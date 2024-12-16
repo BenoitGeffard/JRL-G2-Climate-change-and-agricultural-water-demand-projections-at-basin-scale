@@ -1,0 +1,193 @@
+install.packages("remotes")
+remotes::install_git("https://forgemia.inra.fr/umr-g-eau/cropwat.git")
+
+
+---
+title: "Read DRIAS dataset"
+author: "David Dorchies"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Requirements
+
+Install the required dependencies with `remotes::install_deps()`
+
+## Merge historical and rcp file together
+
+Example with the first scenario available
+
+```{r}
+clim_scenarios <- airGRccia::drias_list(safran = FALSE)
+clim_scenario <- clim_scenarios[1, ]
+RCP <- "rcp85" 
+s <- airGRccia::climate_read(clim_scenario$GCM, clim_scenario$RCM, clim_scenario$BC, RCP)
+
+# Supposons que votre dataframe s'appelle df
+historical <- subset(clim_scenarios, scenario == "historical")
+other_scenarios <- subset(clim_scenarios, scenario != "historical")
+
+
+# Split the data into historical and future scenarios
+historical <- subset(clim_scenarios, scenario == "historical")
+future <- subset(clim_scenarios, scenario %in% c("rcp26", "rcp45", "rcp85"))
+
+for (k in 1:nrow(historical)) {
+  RCP <- c("rcp26", "rcp45", "rcp85")
+  for (j in 1:3){
+    s<- airGRccia::climate_read(historical$GCM, historical$RCM, historical$BC, RCP[j])
+  }}
+  
+
+
+
+# Séparer les données historiques et futures
+historical <- subset(clim_scenarios, scenario == "historical")
+future <- subset(clim_scenarios, scenario %in% c("rcp26", "rcp45", "rcp85"))
+
+# Fusionner les données historiques avec les données futures sur les colonnes GCM, RCM et BC
+# Pour chaque ligne "historical", trouver les lignes "future" correspondantes et les fusionner
+
+merged_data <- list()  # Liste pour stocker les résultats
+
+for (i in 1:nrow(historical)) {
+  # Extraire la ligne historique
+  hist_row <- historical[i, ]
+  
+  # Sélectionner les lignes futures qui ont le même GCM, RCM et BC que la ligne historique
+  future_rows <- subset(future, GCM == hist_row$GCM & RCM == hist_row$RCM & BC == hist_row$BC)
+  
+  # Si des lignes futures correspondantes sont trouvées, les fusionner avec la ligne historique
+  if (nrow(future_rows) > 0) {
+    # Fusionner les lignes historiques et futures (on ajoute un suffixe "_historical" et "_future")
+    # Ajouter la colonne 'scenario' des données futures pour que chaque ligne fusionnée garde le scénario correct
+    future_rows$scenario <- future_rows$scenario  # Conserver les scénarios rcp26, rcp45, rcp85
+    
+    # Fusionner les lignes historiques et futures
+    merged_row <- cbind(hist_row, future_rows[, c("GCM", "RCM", "scenario", "BC","gcm_rcm","file")])  # Ajouter seulement les colonnes nécessaires
+    
+    # Ajouter la ligne fusionnée à la liste des résultats
+    merged_data[[length(merged_data) + 1]] <- merged_row
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Combiner toutes les lignes fusionnées en un seul dataframe
+merged_data_df <- do.call(rbind, merged_data)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Retirer certaines colonnes (exemple: retirer la colonne "Date_future" et "ETP_future")
+merged_data_df <- merged_data_df[, !colnames(merged_data_df) %in% c("GCM...1", "RCM...2","scenario...3","BC...4", "gcm_rcm...5", "file...6")]
+
+# Renommer les colonnes (exemple)
+colnames(merged_data_df) <- c("GCM", "RCM", "scenario", "BC", "gcm_rcm", "file")
+
+
+
+
+# Vérifier la structure du dataframe fusionné
+str(merged_data_df)
+
+for (k in 1:nrow(merged_data_df)) {
+  RCP <- c("rcp26", "rcp45", "rcp85")
+  for (j in 1:3){
+    s<- airGRccia::climate_read(merged_data_df$GCM, merged_data_df$RCM, merged_data_df$BC, RCP[j])
+  }}
+  
+```
+
+## Get meteorological time series from SAFRAN cell number
+
+
+```{r}
+
+sf_safran_cells <- sf::read_sf("safran_cell.gpkg")
+l <- airGRccia::climate_extract_cells(sf_safran_cells$cell, s)
+str(l)
+```
+
+If working on one cell, the data can be reached by using:
+
+```{r}
+setwd("C:/Users/Etudiant/climate_data")
+library(dplyr)
+drias_data<-list()
+for (sce in 1:nrow(merged_data_df)) {
+#Cell <- as.character(sf_safran_cells$cell)
+Cell <- as.character(8427)
+charac<-gsub(".nc",'',as.character(merged_data_df[sce,"file"]))
+
+#if (!dir.exists(charac)) {
+# dir.create(charac)
+#}
+
+for (i in 1:length(Cell)){
+unique_cell<-Cell[i]
+Ptot <- data.frame(l$prtot[,unique_cell])
+colnames(Ptot) <- "Ptot"
+str(Ptot)
+ETP <- l$evspsblpot_FAO[unique_cell] 
+# first it was ETP <- l$evspsblpot_FAO[[,unique_cell]]
+str(ETP)
+Date <- l$dates
+str(Date)
+RCP 
+TABLE1<-data.frame(Date,ETP,Ptot)
+colnames(TABLE1) <- c("Date","ETP","Ptot")
+drias_data[[paste0("SAFRAN_CELL_", unique_cell)]] <- TABLE1
+}
+meteo_drias <- bind_rows(
+  lapply(names(drias_data), function(name) {
+    drias_data[[name]] %>% 
+      mutate(Cell = name) #create Cell column to adress it with the crop table
+  })
+)
+name <- paste0 (charac,".csv")
+write.csv(meteo_drias, name, row.names = TRUE)
+# this is a csv of 1 CELL and 1 COMPLEte SCENARIo
+}
+
+
+
+
+
+
+```
+
+
+## Remaining issues
+
+- Cells 8430 and 8521 are not populated

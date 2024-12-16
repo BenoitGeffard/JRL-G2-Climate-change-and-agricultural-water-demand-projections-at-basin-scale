@@ -1,0 +1,225 @@
+---
+title: "V03 - ANOVA Analysis on ETo"
+author: "David Dorchies"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+In this vignette we try to do an ANOVA analysis on annual ETo an a given cell of 
+the climate dataset: 
+
+```{r}
+sf_safran_cells <- sf::read_sf("safran_cell.gpkg")
+library(tmap)
+cell <- 8426
+sf_selection <- sf_safran_cells |> filter(cell == .env$cell)
+tmap_mode("view")
+tm_basemap(server = "OpenStreetMap") +
+  tm_shape(sf_safran_cells) +
+  tm_borders() +
+  tm_text(text = "cell", auto.placement = TRUE) +
+  tm_shape(sf_selection) +
+  tm_polygons(col = "red", border.col = "red", lwd = 2, alpha = 0.5)
+```
+
+This operation needs several steps:
+
+- get the list of climat scenarios to process
+- create a function for computing annual ETo
+- read and compute annual ETo for all the scenarios
+- Run the QUALYPSO method
+- Display ANOVA results with time descriptor
+
+## List the available scenarios
+
+Complete list of scenarios is:
+
+```{r climScenarios}
+clim_scenarios <- airGRccia::drias_list(safran = FALSE)
+```
+
+Up to now we don't have "CFDt" bias correction, so we remove it from the data set:
+
+```{r filter-climScenarios}
+clim_scenarios <- clim_scenarios |> 
+  filter(BC != "CDFt", scenario != "historical")
+str(clim_scenarios)
+```
+
+Unfortunately, the downloading of all the scenarios doesn't seem to been 
+successfull for all the scenarios, we need to remove the rows on which the 
+files are not available.
+
+```{r}
+scenario_availability <- sapply(seq(nrow(clim_scenarios)), function(i) {
+  airGRccia::climate_is_available(
+    RCP = clim_scenarios$scenario[i],
+    GCM = clim_scenarios$GCM[i],
+    RCM = clim_scenarios$RCM[i],
+    BC = clim_scenarios$BC[i]
+  )
+})
+clim_scenarios <- clim_scenarios[scenario_availability, ]
+```
+
+The final table of scenarios can be summarize as below:
+
+```{r}
+knitr::kable(
+  clim_scenarios |> 
+    ungroup() |> 
+    mutate(X = "X") |> 
+    select(X, gcm_rcm, scenario) |> 
+    tidyr::pivot_wider(names_from = scenario, values_from = X)
+)
+```
+
+
+We have one row by combination of RCP, GCM, RCM which corresponds to two netCDF
+files (historical + selected RCP). 
+The function `airGRccia::read_climate` takes care of merging both (See vignette V02).
+
+Each NetCDF contains two ETo: `evspsblpot_FAO` and `evspsblpot_Hg0175` for 
+respectively FAO formula and Hargrave formulation.
+
+## Function for computing annual 
+
+```{r FnAnnualETo}
+calc_annual_ETo <- function(dates, ETo) {
+  years <- lubridate::year(dates)
+  return(stats::aggregate(ETo, by = list(years), FUN = sum))
+}
+```
+
+
+## Read and compute annual ETo for all the scenarios
+
+
+We loop over the scenarios and populate two tables:
+- `scenAvail`: description of each time series by its characteristics: RCP, GCM, 
+  RCM, ETo formula
+- `Y`: ETo times series with one row by scenario
+
+```{r read-compute-annual-ETo, error = TRUE}
+# First, we create an empty data frame for storing characteristics of each scenario:
+scenAvail <- data.frame(
+  RCP = character(0),
+  GCM = character(0),
+  RCM = character(0),
+  BC = character(0),
+  ETo = character(0)
+)
+
+# And an empty data.frame for storing all yearly time series 
+# rows = scenarios and cols = years
+Y <- data.frame()
+
+# Loop over climatic scenarios (mixing RCPs, GCM-RCMs (and BCs if available))
+for (i in seq(nrow(clim_scenarios))) {
+  RCP <- clim_scenarios$scenario[i]
+  GCM <- clim_scenarios$GCM[i]
+  RCM <- clim_scenarios$RCM[i]
+  BC <- clim_scenarios$BC[i]
+  s <- airGRccia::climate_read(GCM, RCM, BC, RCP)
+  if (is.logical(s) && s == FALSE) {
+    # An error when reading data was detected, we skip that turn
+    next
+  }
+  dates <- stars::st_get_dimension_values(s, "time")
+  clim_variables <- names(s)
+  s <- airGRccia::climate_extract_cells(cell, s)
+  for (formul_ETo in clim_variables[grep("evspsblpot", clim_variables)]) {
+    message("Processing ", RCP, " ", GCM, " ", RCM, " ", formul_ETo)
+    # Get the corresponding ETo
+    ts_ETo <- s[[formul_ETo]]
+    # Compute yearly sum
+    yearly_ETo <- calc_annual_ETo(dates, ts_ETo)
+    # Format the result as a table with one row and year as column names
+    df_yearly_ETo <- matrix(yearly_ETo[[2]], nrow = 1)
+    if (any(is.na(df_yearly_ETo))) {
+      # If NAs are present that means that the data is missing and we skip this turn
+      next
+    }
+    colnames(df_yearly_ETo) <- yearly_ETo[[1]]
+    df_yearly_ETo <- as.data.frame(df_yearly_ETo)
+    # Bind new result with already stored results (take care of missing years)
+    # See ?bind_rows
+    Y <- dplyr::bind_rows(Y, df_yearly_ETo)
+    scenAvail <- dplyr::bind_rows(scenAvail,
+                                  data.frame(
+                                    RCP = RCP,
+                                    GCM = GCM,
+                                    RCM = RCM,
+                                    BC = BC,
+                                    ETo = sub("evspsblpot_", "", formul_ETo)
+                                  ))
+  }
+}
+
+# Conversion of Y as a matrix for QUALYPSO
+Y <- as.matrix(Y)
+```
+
+Let's control the resulting data
+
+```{r}
+scenAvail
+```
+
+```{r}
+str(Y)
+colnames(Y)
+# Columns are not sorted correctly...
+Y <- Y[, sort(colnames(Y))]
+```
+
+
+## ANOVA analysis
+
+QUALYPSO doesn't like a single element in one scenario characteristic.
+We need to remove the BC column if only one BC is present in the scenarios
+
+```{r}
+if (length(unique(scenAvail$BC)) == 1) {
+  scenAvail$BC <- NULL
+}
+```
+
+Let's run QUALYPSO on this data set!
+
+```{r pressure, echo=FALSE}
+library(QUALYPSO)
+listOption = list(
+  typeChangeVariable = 'rel', # relative evolution
+  ANOVAmethod = "QUALYPSO"
+)
+QUALYPSO.synth <- QUALYPSO(
+  Y = Y,
+  scenAvail = scenAvail,
+  X = as.numeric(colnames(Y)),
+  listOption = listOption
+)
+```
+
+And plot the results!
+
+Main RCP effect on evolution of ETo
+
+```{r}
+plotQUALYPSOeffect(QUALYPSO.synth, nameEff = "RCP", xlab = "Years", main = "Relative effect of each RCP on ETo")
+```
+
+We can plot the total decomposition of variance
+
+```{r}
+plotQUALYPSOMeanChangeAndUncertainties(QUALYPSO.synth, xlab = "Years")
+```
+
+
+
+
